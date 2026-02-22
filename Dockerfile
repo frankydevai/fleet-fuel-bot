@@ -24,5 +24,5 @@ COPY *.py ./
 HEALTHCHECK --interval=5m --timeout=30s --start-period=30s --retries=3 \
     CMD python -c "import sys; sys.exit(0)"
 
-# Run the bot
-CMD ["python", "main.py"]
+# Run the bot with health check wrapper
+CMD ["python", "run.py"]
