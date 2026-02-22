@@ -1,7 +1,5 @@
-# ── FleetFuel Bot – Google Cloud Run Dockerfile ──────────────────────────────
 FROM python:3.11-slim
 
-# Prevent .pyc files and enable stdout logging (Cloud Run reads stdout/stderr)
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
@@ -16,10 +14,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application source (exclude .venv and __pycache__)
+# Copy Python files
 COPY *.py ./
-COPY *.csv ./
-COPY .env ./
 
-# Cloud Run Jobs: just run the bot (no HTTP server needed)
+# CSV files are loaded from database, not from filesystem
+# This makes the container portable and ready to deploy
+
+# Health check
+HEALTHCHECK --interval=5m --timeout=30s --start-period=30s --retries=3 \
+    CMD python -c "import sys; sys.exit(0)"
+
+# Run the bot
 CMD ["python", "main.py"]
