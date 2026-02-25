@@ -19,6 +19,7 @@ from config import DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME
 # ── Connection pool (simple) ──────────────────────────────────────────────────
 
 def get_connection():
+    ssl = {"ssl": {"ssl_disabled": False}} if not DB_HOST.startswith("/") else {}
     return pymysql.connect(
         host=DB_HOST,
         port=DB_PORT,
@@ -28,6 +29,8 @@ def get_connection():
         charset="utf8mb4",
         cursorclass=pymysql.cursors.DictCursor,
         autocommit=False,
+        ssl_verify_cert=False,
+        **ssl,
     )
 
 
@@ -138,10 +141,13 @@ CREATE TABLE IF NOT EXISTS truck_states (
 def init_db():
     """Create database + all tables if they don't exist."""
     # Connect without db first to create it
+    ssl = {"ssl": {"ssl_disabled": False}} if not DB_HOST.startswith("/") else {}
     conn = pymysql.connect(
         host=DB_HOST, port=DB_PORT,
         user=DB_USER, password=DB_PASSWORD,
         charset="utf8mb4",
+        ssl_verify_cert=False,
+        **ssl,
     )
     with conn.cursor() as cur:
         cur.execute(f"CREATE DATABASE IF NOT EXISTS `{DB_NAME}` CHARACTER SET utf8mb4;")
