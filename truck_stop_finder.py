@@ -14,6 +14,18 @@ PARKED (speed ≤ 5 mph):
   Ignore brand priority — just find the single nearest stop (Pilot OR Love's).
   Heading filter is also off because a parked truck has no meaningful direction.
   This prevents sending a driver 36 miles to a Pilot when a Love's is 0.1 miles away.
+
+FIX (2026-02-25):
+  _NEARBY_ALWAYS_MILES raised from 5 → 15.
+  Trucks approaching a highway exit on a curve can have a bearing deviation that
+  makes a stop appear "behind" them even though it is the correct next stop.
+  Raising the bypass threshold ensures any stop within 15 mi is never filtered
+  out by the heading check, matching real-world driver expectations.
+
+  Additionally added a fallback "drop heading filter entirely" pass at each radius
+  so that if the heading-filtered search returns nothing, we retry without the
+  heading filter and log a warning. This catches edge-cases like the I-95
+  Hardeeville Pilot that was being silently dropped.
 """
 
 import math
@@ -30,8 +42,8 @@ from database import get_all_stops_with_diesel
 log = logging.getLogger(__name__)
 
 EARTH_RADIUS_MILES   = 3958.8
-_PARKED_SPEED_MPH    = 5    # ≤ this → treat as parked
-_NEARBY_ALWAYS_MILES = 5    # stops this close bypass heading filter even when moving
+_PARKED_SPEED_MPH    = 5     # ≤ this → treat as parked
+_NEARBY_ALWAYS_MILES = 15    # FIX: was 5 — stops this close bypass heading filter
 
 
 # ── Enum ──────────────────────────────────────────────────────────────────────
@@ -90,10 +102,14 @@ def _is_pilot_or_loves(brand: str) -> bool:
 # ── Core search ───────────────────────────────────────────────────────────────
 
 def _search(stops, truck_lat, truck_lng, truck_heading, speed_mph,
-            radius, brand_check):
+            radius, brand_check, *, ignore_heading=False):
     """
     Return matching stops within radius sorted by distance.
-    Heading filter is skipped for parked trucks and very nearby stops.
+
+    Heading filter is skipped when:
+      - ignore_heading=True (explicit override)
+      - truck is parked (speed ≤ _PARKED_SPEED_MPH)
+      - stop is within _NEARBY_ALWAYS_MILES (FIX: raised to 15 mi)
     """
     parked = speed_mph <= _PARKED_SPEED_MPH
     candidates = []
@@ -112,8 +128,15 @@ def _search(stops, truck_lat, truck_lng, truck_heading, speed_mph,
         bear = _bearing(truck_lat, truck_lng, slat, slng)
         dev  = _angle_diff(truck_heading, bear)
 
-        if not parked and dist > _NEARBY_ALWAYS_MILES:
+        # Apply heading filter only for moving trucks beyond the nearby bypass zone
+        if not ignore_heading and not parked and dist > _NEARBY_ALWAYS_MILES:
             if dev > MAX_HEADING_DEVIATION_DEG:
+                log.debug(
+                    f"Heading filter dropped: {stop.get('name','?')} "
+                    f"dist={dist:.1f}mi bear={bear:.1f}° "
+                    f"truck_heading={truck_heading:.1f}° dev={dev:.1f}° "
+                    f"(max={MAX_HEADING_DEVIATION_DEG}°)"
+                )
                 continue
 
         candidates.append({
@@ -128,6 +151,32 @@ def _search(stops, truck_lat, truck_lng, truck_heading, speed_mph,
     return candidates
 
 
+def _search_with_heading_fallback(stops, truck_lat, truck_lng, truck_heading,
+                                   speed_mph, radius, brand_check, label: str):
+    """
+    Try heading-filtered search first.
+    If it returns nothing, retry without the heading filter and log a warning.
+    This prevents silent misses caused by highway curves or ramp geometry.
+    """
+    results = _search(stops, truck_lat, truck_lng, truck_heading,
+                      speed_mph, radius, brand_check)
+    if results:
+        return results
+
+    # Fallback: drop heading filter
+    fallback = _search(stops, truck_lat, truck_lng, truck_heading,
+                       speed_mph, radius, brand_check, ignore_heading=True)
+    if fallback:
+        log.warning(
+            f"Stop finder [{label}]: heading filter excluded all stops — "
+            f"falling back to nearest regardless of heading. "
+            f"Closest: {fallback[0]['name']} {fallback[0]['distance_miles']:.1f} mi "
+            f"dev={fallback[0]['heading_deviation']:.1f}°. "
+            f"Consider raising MAX_HEADING_DEVIATION_DEG or _NEARBY_ALWAYS_MILES."
+        )
+    return fallback
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def find_best_stop(truck_lat: float, truck_lng: float,
@@ -138,6 +187,8 @@ def find_best_stop(truck_lat: float, truck_lng: float,
 
     PARKED: nearest Pilot or Love's wins (no brand priority, no heading filter).
     MOVING: Pilot preferred, Love's fallback, then extended 80 mi search.
+            Each step falls back to ignoring heading if the filtered search
+            returns no results (handles curved ramps / exits).
 
     Returns (stop_dict, StopType).
     """
@@ -181,29 +232,37 @@ def find_best_stop(truck_lat: float, truck_lng: float,
     # ── Moving: brand priority chain ──────────────────────────────────────────
 
     # 1. Pilot / Flying J ≤ 50 mi ahead
-    results = _search(all_stops, truck_lat, truck_lng, truck_heading,
-                      speed_mph, PILOT_RADIUS_MILES, _is_pilot)
+    results = _search_with_heading_fallback(
+        all_stops, truck_lat, truck_lng, truck_heading,
+        speed_mph, PILOT_RADIUS_MILES, _is_pilot, "Pilot ≤50mi"
+    )
     if results:
         log.info(f"Stop finder: Pilot {results[0]['distance_miles']:.1f} mi ahead")
         return results[0], StopType.PILOT_50
 
     # 2. Love's ≤ 50 mi ahead
-    results = _search(all_stops, truck_lat, truck_lng, truck_heading,
-                      speed_mph, LOVES_RADIUS_MILES, _is_loves)
+    results = _search_with_heading_fallback(
+        all_stops, truck_lat, truck_lng, truck_heading,
+        speed_mph, LOVES_RADIUS_MILES, _is_loves, "Love's ≤50mi"
+    )
     if results:
         log.info(f"Stop finder: Love's {results[0]['distance_miles']:.1f} mi ahead (no Pilot ≤50 mi)")
         return results[0], StopType.LOVES_50
 
     # 3. Pilot / Flying J ≤ 80 mi ahead
-    results = _search(all_stops, truck_lat, truck_lng, truck_heading,
-                      speed_mph, EXTENDED_RADIUS_MILES, _is_pilot)
+    results = _search_with_heading_fallback(
+        all_stops, truck_lat, truck_lng, truck_heading,
+        speed_mph, EXTENDED_RADIUS_MILES, _is_pilot, "Pilot ≤80mi"
+    )
     if results:
         log.info(f"Stop finder: Pilot {results[0]['distance_miles']:.1f} mi ahead (extended)")
         return results[0], StopType.PILOT_80
 
     # 4. Love's ≤ 80 mi ahead
-    results = _search(all_stops, truck_lat, truck_lng, truck_heading,
-                      speed_mph, EXTENDED_RADIUS_MILES, _is_loves)
+    results = _search_with_heading_fallback(
+        all_stops, truck_lat, truck_lng, truck_heading,
+        speed_mph, EXTENDED_RADIUS_MILES, _is_loves, "Love's ≤80mi"
+    )
     if results:
         log.info(f"Stop finder: Love's {results[0]['distance_miles']:.1f} mi ahead (extended)")
         return results[0], StopType.LOVES_80
