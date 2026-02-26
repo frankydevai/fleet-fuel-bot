@@ -6,14 +6,6 @@ Tables:
   stop_assignments  – which stop was assigned to which alert
   stop_flags        – VISITED / SKIPPED / PENDING tracking
   truck_states      – current state of each truck (for persistence)
-
-FIX (2026-02-25):
-  truck_states table was missing 'sleeping' and 'fuel_when_parked' columns.
-  These are used by state_machine.py to track parked/sleeping trucks and detect
-  refueling. Without them, every Cloud Run restart would lose sleeping state,
-  causing duplicate alerts on parked trucks.
-
-  load_all_truck_states() and save_truck_state() updated to include these fields.
 """
 
 import pymysql
@@ -27,7 +19,6 @@ from config import DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME
 # ── Connection pool (simple) ──────────────────────────────────────────────────
 
 def get_connection():
-    ssl = {"ssl": {"ssl_disabled": False}} if not DB_HOST.startswith("/") else {}
     return pymysql.connect(
         host=DB_HOST,
         port=DB_PORT,
@@ -37,8 +28,6 @@ def get_connection():
         charset="utf8mb4",
         cursorclass=pymysql.cursors.DictCursor,
         autocommit=False,
-        ssl_verify_cert=False,
-        **ssl,
     )
 
 
@@ -104,12 +93,12 @@ CREATE TABLE IF NOT EXISTS stop_assignments (
 ) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS stop_flags (
-    id                INT AUTO_INCREMENT PRIMARY KEY,
-    alert_id          INT            NOT NULL,
-    vehicle_id        VARCHAR(100)   NOT NULL,
-    stop_id           INT            NOT NULL,
-    flag              ENUM('visited','skipped','pending') NOT NULL DEFAULT 'pending',
-    flagged_at        DATETIME       NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    id              INT AUTO_INCREMENT PRIMARY KEY,
+    alert_id        INT            NOT NULL,
+    vehicle_id      VARCHAR(100)   NOT NULL,
+    stop_id         INT            NOT NULL,
+    flag            ENUM('visited','skipped','pending') NOT NULL DEFAULT 'pending',
+    flagged_at      DATETIME       NOT NULL DEFAULT CURRENT_TIMESTAMP,
     skip_alert_msg_id BIGINT,
     FOREIGN KEY (alert_id) REFERENCES fuel_alerts(id),
     FOREIGN KEY (stop_id)  REFERENCES pilot_stops(id),
@@ -121,25 +110,25 @@ CREATE TABLE IF NOT EXISTS truck_states (
     vehicle_id              VARCHAR(100) PRIMARY KEY,
     vehicle_name            VARCHAR(255),
     driver_name             VARCHAR(255),
-    state                   VARCHAR(50)  NOT NULL DEFAULT 'UNKNOWN',
+    state                   VARCHAR(50) NOT NULL DEFAULT 'UNKNOWN',
     fuel_pct                FLOAT,
     latitude                DOUBLE,
     longitude               DOUBLE,
     speed_mph               FLOAT,
     heading                 FLOAT,
-    next_poll               DATETIME     NOT NULL,
+    next_poll               DATETIME NOT NULL,
     parked_since            DATETIME,
-    alert_sent              TINYINT(1)   DEFAULT 0,
-    overnight_alert_sent    TINYINT(1)   DEFAULT 0,
+    alert_sent              TINYINT(1) DEFAULT 0,
+    overnight_alert_sent    TINYINT(1) DEFAULT 0,
     open_alert_id           INT,
     assigned_stop_id        INT,
     assigned_stop_name      VARCHAR(255),
     assigned_stop_lat       DOUBLE,
     assigned_stop_lng       DOUBLE,
     assignment_time         DATETIME,
-    in_yard                 TINYINT(1)   DEFAULT 0,
+    in_yard                 TINYINT(1) DEFAULT 0,
     yard_name               VARCHAR(100),
-    sleeping                TINYINT(1)   DEFAULT 0,
+    sleeping                TINYINT(1) DEFAULT 0,
     fuel_when_parked        FLOAT,
     last_updated            DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_next_poll (next_poll),
@@ -147,30 +136,21 @@ CREATE TABLE IF NOT EXISTS truck_states (
 ) ENGINE=InnoDB;
 """
 
-# Migration: add missing columns to existing truck_states tables
-MIGRATION_SQL = [
-    "ALTER TABLE truck_states ADD COLUMN sleeping TINYINT(1) DEFAULT 0",
-    "ALTER TABLE truck_states ADD COLUMN fuel_when_parked FLOAT",
-]
-
 
 def init_db():
-    """Create database + all tables if they don't exist. Run migrations for existing tables."""
+    """Create database + all tables if they don't exist."""
     # Connect without db first to create it
-    ssl = {"ssl": {"ssl_disabled": False}} if not DB_HOST.startswith("/") else {}
     conn = pymysql.connect(
         host=DB_HOST, port=DB_PORT,
         user=DB_USER, password=DB_PASSWORD,
         charset="utf8mb4",
-        ssl_verify_cert=False,
-        **ssl,
     )
     with conn.cursor() as cur:
         cur.execute(f"CREATE DATABASE IF NOT EXISTS `{DB_NAME}` CHARACTER SET utf8mb4;")
     conn.commit()
     conn.close()
 
-    # Create tables
+    # Now create tables
     conn = get_connection()
     with conn.cursor() as cur:
         for statement in SCHEMA_SQL.strip().split(";"):
@@ -179,24 +159,27 @@ def init_db():
                 cur.execute(statement)
     conn.commit()
     conn.close()
-
-    # Run migrations — catch error 1060 (Duplicate column) so re-runs are safe
+    _run_migrations()
+    print("✅  Database schema ready.")
+    """Add columns that may be missing from existing databases."""
+    migrations = [
+        "ALTER TABLE truck_states ADD COLUMN sleeping TINYINT(1) DEFAULT 0",
+        "ALTER TABLE truck_states ADD COLUMN fuel_when_parked FLOAT",
+    ]
     conn = get_connection()
-    for migration in MIGRATION_SQL:
+    for sql in migrations:
         try:
             with conn.cursor() as cur:
-                cur.execute(migration)
+                cur.execute(sql)
             conn.commit()
         except Exception as e:
             conn.rollback()
             if getattr(e, "args", [None])[0] == 1060:
-                pass  # Column already exists — safe to ignore
+                pass  # Column already exists, safe to skip
             else:
                 conn.close()
                 raise
     conn.close()
-
-    print("✅  Database schema ready.")
 
 
 # ── pilot_stops ───────────────────────────────────────────────────────────────
@@ -318,7 +301,7 @@ def get_pending_flag_by_alert(alert_id: int) -> dict | None:
     """Get pending flag for a specific alert."""
     with db_cursor() as cur:
         cur.execute(
-            """SELECT sf.*, ps.name AS stop_name,
+            """SELECT sf.*, ps.name AS stop_name, 
                       ps.latitude AS stop_lat, ps.longitude AS stop_lng
                FROM stop_flags sf
                JOIN pilot_stops ps ON sf.stop_id = ps.id
@@ -353,35 +336,34 @@ def load_all_truck_states() -> dict:
     with db_cursor() as cur:
         cur.execute("SELECT * FROM truck_states")
         rows = cur.fetchall()
-
+    
     states = {}
     for row in rows:
-        vid = row["vehicle_id"]
+        vid = row['vehicle_id']
         states[vid] = {
-            "vehicle_id":           vid,
-            "vehicle_name":         row["vehicle_name"],
-            "driver_name":          row["driver_name"],
-            "state":                row["state"],
-            "fuel_pct":             row["fuel_pct"],
-            "lat":                  row["latitude"],
-            "lng":                  row["longitude"],
-            "speed_mph":            row["speed_mph"],
-            "heading":              row["heading"],
-            "next_poll":            row["next_poll"],
-            "parked_since":         row["parked_since"],
-            "alert_sent":           bool(row["alert_sent"]),
-            "overnight_alert_sent": bool(row["overnight_alert_sent"]),
-            "open_alert_id":        row["open_alert_id"],
-            "assigned_stop_id":     row["assigned_stop_id"],
-            "assigned_stop_name":   row["assigned_stop_name"],
-            "assigned_stop_lat":    row["assigned_stop_lat"],
-            "assigned_stop_lng":    row["assigned_stop_lng"],
-            "assignment_time":      row["assignment_time"],
-            "in_yard":              bool(row["in_yard"]),
-            "yard_name":            row["yard_name"],
-            # FIX: these two were missing — caused sleeping state loss on restart
-            "sleeping":             bool(row.get("sleeping", 0)),
-            "fuel_when_parked":     row.get("fuel_when_parked"),
+            'vehicle_id': vid,
+            'vehicle_name': row['vehicle_name'],
+            'driver_name': row['driver_name'],
+            'state': row['state'],
+            'fuel_pct': row['fuel_pct'],
+            'lat': row['latitude'],
+            'lng': row['longitude'],
+            'speed_mph': row['speed_mph'],
+            'heading': row['heading'],
+            'next_poll': row['next_poll'],
+            'parked_since': row['parked_since'],
+            'alert_sent': bool(row['alert_sent']),
+            'overnight_alert_sent': bool(row['overnight_alert_sent']),
+            'open_alert_id': row['open_alert_id'],
+            'assigned_stop_id': row['assigned_stop_id'],
+            'assigned_stop_name': row['assigned_stop_name'],
+            'assigned_stop_lat': row['assigned_stop_lat'],
+            'assigned_stop_lng': row['assigned_stop_lng'],
+            'assignment_time': row['assignment_time'],
+            'in_yard': bool(row['in_yard']),
+            'yard_name': row['yard_name'],
+            'sleeping': bool(row.get('sleeping', 0)),
+            'fuel_when_parked': row.get('fuel_when_parked'),
         }
     return states
 
@@ -450,7 +432,7 @@ def get_open_alert_for_vehicle(vehicle_id: str) -> dict | None:
     """Get the most recent open alert for a vehicle."""
     with db_cursor() as cur:
         cur.execute(
-            """SELECT * FROM fuel_alerts
+            """SELECT * FROM fuel_alerts 
                WHERE vehicle_id=%s AND status='open'
                ORDER BY alert_sent_at DESC LIMIT 1""",
             (vehicle_id,)
