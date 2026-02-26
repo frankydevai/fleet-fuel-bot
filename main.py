@@ -1,6 +1,10 @@
 """
 main.py  -  FleetFuel Bot with smart per-truck polling
 """
+"""
+main.py  -  FleetFuel Bot with smart per-truck polling
+Revised for Railway/Docker CSV Seeding
+"""
 
 import logging
 import time
@@ -44,8 +48,9 @@ signal.signal(signal.SIGINT,  _shutdown)
 
 def _auto_seed():
     """
-    If pilot_stops table is empty, find and seed CSV files automatically.
-    Searches multiple directories so it works both locally and in Docker.
+    Revised seeding logic:
+    - Checks /app (Docker WORKDIR) and script directory.
+    - Matches filenames: pilot.csv and loves.csv.
     """
     stops = get_all_stops_with_diesel()
     if stops:
@@ -54,26 +59,24 @@ def _auto_seed():
 
     log.info("   pilot_stops table is empty — searching for CSV files...")
 
-    # All directories to search
+    # Define paths based on your Dockerfile WORKDIR
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    search_dirs = list(dict.fromkeys([script_dir, "/app", ".", os.getcwd()]))
+    app_dir = "/app"
+    search_dirs = list(dict.fromkeys([script_dir, app_dir, ".", os.getcwd()]))
 
-    # Log what files are available to help debug
+    # DEBUG: Log what the container actually sees
     for d in search_dirs:
-        try:
-            files = [f for f in os.listdir(d) if f.endswith(".csv")]
-            if files:
-                log.info(f"   CSV files found in {d}: {files}")
-        except Exception:
-            pass
+        if os.path.exists(d):
+            try:
+                found_files = os.listdir(d)
+                log.info(f"   Directory check: {d} contains {found_files}")
+            except Exception as e:
+                log.error(f"   Could not list directory {d}: {e}")
 
-    # CSV filenames to look for and their brand
+    # Updated filenames to match your current setup
     csv_candidates = [
-        ("all_stops.csv",    ""),
-        ("pilot_stops.csv",  "pilot"),
-        ("loves_stops.csv",  "loves"),
-        ("pilot.csv",        "pilot"),
-        ("loves.csv",        "loves"),
+        ("pilot.csv", "pilot"),
+        ("loves.csv", "loves"),
     ]
 
     seeded = False
@@ -82,16 +85,20 @@ def _auto_seed():
     for search_dir in search_dirs:
         for filename, brand in csv_candidates:
             filepath = os.path.join(search_dir, filename)
-            # avoid seeding same file twice from different dir references
+            
+            # Case-sensitive check for Linux/Docker environment
+            if not os.path.exists(filepath):
+                continue
+                
             real = os.path.realpath(filepath)
             if real in already_seeded:
                 continue
-            if not os.path.exists(filepath):
-                continue
+                
             already_seeded.add(real)
-            log.info(f"   Seeding from {filepath} (brand={brand or 'auto'})...")
+            log.info(f"   Seeding from {filepath} (brand={brand})...")
             try:
                 from seed_pilot_stops import seed
+                # Note: using brand_override=brand so the seeder knows which logic to use
                 seed(filepath=filepath, brand_override=brand,
                      dry_run=False, delimiter=",")
                 seeded = True
@@ -102,8 +109,7 @@ def _auto_seed():
         count = len(get_all_stops_with_diesel())
         log.info(f"   Seeding complete — {count} diesel stops now in DB")
     else:
-        log.warning("   No CSV files found. Pilot/Love's stops not loaded — "
-                    "alerts will show 'no stop found' until CSV is added to repo.")
+        log.warning("   No CSV files found in search paths. Stops not loaded.")
 
 
 # -- Helpers ------------------------------------------------------------------
@@ -123,12 +129,13 @@ def main():
     log.info("Checking database schema...")
     init_db()
 
-    # Optional: reset truck states on startup
+    # CRITICAL: If table is "empty" but seeding failed before, 
+    # setting RESET_DB=1 in Railway will fix it.
     if os.getenv("RESET_DB", "0") == "1":
-        log.info("RESET_DB=1 — clearing all truck state history...")
+        log.info("RESET_DB=1 — clearing all truck state history and stop data...")
         reset_truck_states()
 
-    # Auto-seed CSV files if pilot_stops table is empty
+    # Auto-seed CSV files
     _auto_seed()
 
     # Load saved state from DB
@@ -164,7 +171,7 @@ def main():
                     if next_poll <= now:
                         due_trucks.append(vid)
 
-            # Step 2: Batch-fetch ALL trucks from Samsara (1 API call)
+            # Step 2: Fetch data from Samsara
             try:
                 all_trucks = get_combined_vehicle_data()
             except Exception as e:
@@ -175,42 +182,27 @@ def main():
             log.info(f"Poll #{poll_cycle}: {len(all_trucks)} trucks fetched, "
                      f"{len(due_trucks)} due for check")
 
-            state_counts = {}
-            for s in truck_states.values():
-                st = s.get("state", "UNKNOWN")
-                state_counts[st] = state_counts.get(st, 0) + 1
-            if state_counts:
-                log.info(f"   Fleet states: {state_counts}")
-
             # Step 3: Process due trucks
             for vid in due_trucks:
-                current_data = next(
-                    (t for t in all_trucks if t["vehicle_id"] == vid), None
-                )
+                current_data = next((t for t in all_trucks if t["vehicle_id"] == vid), None)
                 if current_data is None:
-                    log.warning(f"   Truck {vid} not found in Samsara (offline?)")
                     if vid in truck_states:
                         truck_states[vid]["next_poll"] = now + timedelta(minutes=30)
                     continue
                 try:
                     process_truck(vid, truck_states.get(vid, {}), current_data, truck_states)
                 except Exception as e:
-                    log.error(f"Error processing truck {vid}: {e}", exc_info=True)
+                    log.error(f"Error processing truck {vid}: {e}")
 
-            # Step 4: Process new trucks not yet in state
+            # Step 4: Add new trucks
             for truck in all_trucks:
                 vid = truck["vehicle_id"]
                 if vid not in truck_states:
                     log.info(f"   New truck discovered: {truck['vehicle_name']} ({vid})")
-                    try:
-                        process_truck(vid, {}, truck, truck_states)
-                        time.sleep(1)
-                    except Exception as e:
-                        log.error(f"Error processing new truck {vid}: {e}", exc_info=True)
+                    process_truck(vid, {}, truck, truck_states)
 
             # Step 5: Periodic DB save
             if (now - last_db_save).total_seconds() >= STATE_SAVE_INTERVAL_SECONDS:
-                log.info(f"Saving {len(truck_states)} truck states to DB...")
                 save_all_truck_states(truck_states)
                 last_db_save = now
 
