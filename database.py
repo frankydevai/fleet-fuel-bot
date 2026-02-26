@@ -149,8 +149,8 @@ CREATE TABLE IF NOT EXISTS truck_states (
 
 # Migration: add missing columns to existing truck_states tables
 MIGRATION_SQL = [
-    "ALTER TABLE truck_states ADD COLUMN IF NOT EXISTS sleeping TINYINT(1) DEFAULT 0",
-    "ALTER TABLE truck_states ADD COLUMN IF NOT EXISTS fuel_when_parked FLOAT",
+    "ALTER TABLE truck_states ADD COLUMN sleeping TINYINT(1) DEFAULT 0",
+    "ALTER TABLE truck_states ADD COLUMN fuel_when_parked FLOAT",
 ]
 
 
@@ -180,17 +180,20 @@ def init_db():
     conn.commit()
     conn.close()
 
-    # Run migrations (safe to run repeatedly — IF NOT EXISTS)
+    # Run migrations — catch error 1060 (Duplicate column) so re-runs are safe
     conn = get_connection()
-    with conn.cursor() as cur:
-        for migration in MIGRATION_SQL:
-            try:
+    for migration in MIGRATION_SQL:
+        try:
+            with conn.cursor() as cur:
                 cur.execute(migration)
-            except Exception as e:
-                # IF NOT EXISTS not supported on older MySQL — ignore duplicate column errors
-                if "Duplicate column" not in str(e):
-                    raise
-    conn.commit()
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            if getattr(e, "args", [None])[0] == 1060:
+                pass  # Column already exists — safe to ignore
+            else:
+                conn.close()
+                raise
     conn.close()
 
     print("✅  Database schema ready.")
