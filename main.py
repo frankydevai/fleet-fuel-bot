@@ -1,13 +1,5 @@
 """
 main.py  -  FleetFuel Bot with smart per-truck polling
-
-Polling strategy:
-  - Batch-fetch all trucks from Samsara (1 API call)
-  - Check which trucks are due for polling based on their state
-  - Process only the due trucks
-  - Save state to DB every 5 minutes
-
-Auto-seed: if pilot_stops table is empty and CSV files are present, seeds automatically.
 """
 
 import logging
@@ -52,41 +44,66 @@ signal.signal(signal.SIGINT,  _shutdown)
 
 def _auto_seed():
     """
-    If pilot_stops table is empty and CSV files exist, seed them automatically.
-    Looks for: pilot_stops.csv, loves_stops.csv, all_stops.csv
+    If pilot_stops table is empty, find and seed CSV files automatically.
+    Searches multiple directories so it works both locally and in Docker.
     """
     stops = get_all_stops_with_diesel()
     if stops:
-        log.info(f"   pilot_stops table has {len(stops)} stops — skipping auto-seed")
+        log.info(f"   pilot_stops: {len(stops)} stops loaded — skipping seed")
         return
 
-    log.info("   pilot_stops table is empty — checking for CSV files to seed...")
+    log.info("   pilot_stops table is empty — searching for CSV files...")
 
-    # CSV files to look for and their brand
+    # All directories to search
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    search_dirs = list(dict.fromkeys([script_dir, "/app", ".", os.getcwd()]))
+
+    # Log what files are available to help debug
+    for d in search_dirs:
+        try:
+            files = [f for f in os.listdir(d) if f.endswith(".csv")]
+            if files:
+                log.info(f"   CSV files found in {d}: {files}")
+        except Exception:
+            pass
+
+    # CSV filenames to look for and their brand
     csv_candidates = [
-        ("all_stops.csv",    ""),       # combined file, auto-detect brand
+        ("all_stops.csv",    ""),
         ("pilot_stops.csv",  "pilot"),
         ("loves_stops.csv",  "loves"),
-        ("loves.csv",        "loves"),
         ("pilot.csv",        "pilot"),
+        ("loves.csv",        "loves"),
     ]
 
     seeded = False
-    for filename, brand in csv_candidates:
-        if os.path.exists(filename):
-            log.info(f"   Found {filename} — seeding...")
+    already_seeded = set()
+
+    for search_dir in search_dirs:
+        for filename, brand in csv_candidates:
+            filepath = os.path.join(search_dir, filename)
+            # avoid seeding same file twice from different dir references
+            real = os.path.realpath(filepath)
+            if real in already_seeded:
+                continue
+            if not os.path.exists(filepath):
+                continue
+            already_seeded.add(real)
+            log.info(f"   Seeding from {filepath} (brand={brand or 'auto'})...")
             try:
                 from seed_pilot_stops import seed
-                seed(filepath=filename, brand_override=brand,
+                seed(filepath=filepath, brand_override=brand,
                      dry_run=False, delimiter=",")
                 seeded = True
-                log.info(f"   Seeded from {filename} successfully")
             except Exception as e:
-                log.error(f"   Failed to seed from {filename}: {e}")
+                log.error(f"   Seed failed for {filepath}: {e}", exc_info=True)
 
-    if not seeded:
-        log.warning("   No CSV files found for auto-seed. "
-                    "Add pilot_stops.csv and/or loves_stops.csv to your repo.")
+    if seeded:
+        count = len(get_all_stops_with_diesel())
+        log.info(f"   Seeding complete — {count} diesel stops now in DB")
+    else:
+        log.warning("   No CSV files found. Pilot/Love's stops not loaded — "
+                    "alerts will show 'no stop found' until CSV is added to repo.")
 
 
 # -- Helpers ------------------------------------------------------------------
@@ -106,9 +123,9 @@ def main():
     log.info("Checking database schema...")
     init_db()
 
-    # Optional: reset truck states on startup (set RESET_DB=1 env var)
+    # Optional: reset truck states on startup
     if os.getenv("RESET_DB", "0") == "1":
-        log.info("RESET_DB=1 detected - clearing all truck state history...")
+        log.info("RESET_DB=1 — clearing all truck state history...")
         reset_truck_states()
 
     # Auto-seed CSV files if pilot_stops table is empty
@@ -119,13 +136,13 @@ def main():
     truck_states = load_all_truck_states()
     log.info(f"   Loaded {len(truck_states)} truck states")
 
-    # Notify Telegram group
+    # Notify Telegram
     try:
         send_startup_message()
     except Exception as e:
         log.warning(f"Could not send startup message: {e}")
 
-    log.info("Starting smart polling loop...")
+    log.info("Starting polling loop...")
 
     last_db_save = _utcnow()
     poll_cycle   = 0
@@ -158,7 +175,6 @@ def main():
             log.info(f"Poll #{poll_cycle}: {len(all_trucks)} trucks fetched, "
                      f"{len(due_trucks)} due for check")
 
-            # Log summary of current states
             state_counts = {}
             for s in truck_states.values():
                 st = s.get("state", "UNKNOWN")
@@ -166,27 +182,22 @@ def main():
             if state_counts:
                 log.info(f"   Fleet states: {state_counts}")
 
-            # Step 3: Process only the due trucks
+            # Step 3: Process due trucks
             for vid in due_trucks:
-                current_data = None
-                for truck in all_trucks:
-                    if truck["vehicle_id"] == vid:
-                        current_data = truck
-                        break
-
+                current_data = next(
+                    (t for t in all_trucks if t["vehicle_id"] == vid), None
+                )
                 if current_data is None:
-                    log.warning(f"   Truck {vid} not found in Samsara data (offline?)")
+                    log.warning(f"   Truck {vid} not found in Samsara (offline?)")
                     if vid in truck_states:
                         truck_states[vid]["next_poll"] = now + timedelta(minutes=30)
                     continue
-
                 try:
-                    prev_state = truck_states.get(vid, {})
-                    process_truck(vid, prev_state, current_data, truck_states)
+                    process_truck(vid, truck_states.get(vid, {}), current_data, truck_states)
                 except Exception as e:
                     log.error(f"Error processing truck {vid}: {e}", exc_info=True)
 
-            # Step 4: Add and process any new trucks not yet in state
+            # Step 4: Process new trucks not yet in state
             for truck in all_trucks:
                 vid = truck["vehicle_id"]
                 if vid not in truck_states:
