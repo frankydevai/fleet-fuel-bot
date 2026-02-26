@@ -1,5 +1,4 @@
-# CSV files - these should be loaded into database separately
-*.csv
+
 
 # Python
 __pycache__/
