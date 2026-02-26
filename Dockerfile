@@ -14,8 +14,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY *.py ./
+COPY *.csv ./
 
-# DATA_DIR will be set to /data in Railway (persistent volume)
 ENV DATA_DIR=/data
 
 CMD ["python", "main.py"]
