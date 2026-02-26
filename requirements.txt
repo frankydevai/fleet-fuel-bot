@@ -1,4 +1,2 @@
 requests==2.31.0
-pymysql[rsa]==1.1.1
-cryptography==41.0.7
 python-dotenv==1.0.0

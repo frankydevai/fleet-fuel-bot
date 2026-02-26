@@ -21,16 +21,6 @@ TRUCK WAKES UP (was parked, now moving again):
   → Clear SLEEPING state
 
 YARD trucks: zero alerts, zero checks, always ignored.
-
-FIX (2026-02-25):
-  _clear_alert() was not resetting 'alert_sent'. This meant that when a truck
-  woke up still low on fuel, _clear_alert() was called to wipe the old sleeping
-  alert, but alert_sent remained True — so _fire_alert() was never called for
-  the fresh moving alert. Driver would get no directions to a stop.
-
-  Also fixed: after flag check marks a stop visited/skipped and calls
-  _clear_alert(), the next poll cycle would skip firing a new alert because
-  alert_sent was still True. Now _clear_alert() always resets alert_sent.
 """
 
 import logging
@@ -110,25 +100,19 @@ def _new_state(vid, data):
         "assignment_time":      None,
         "in_yard":              False,
         "yard_name":            None,
-        "fuel_when_parked":     None,
-        "sleeping":             False,
+        "fuel_when_parked":     None,   # fuel level recorded when truck stopped
+        "sleeping":             False,  # True while parked with low fuel
     }
 
 
 def _clear_alert(state):
-    """
-    Reset all alert-related state fields.
-    FIX: alert_sent is now explicitly reset to False so that after a stop
-    is visited/skipped or a sleeping truck wakes up, the next low-fuel
-    condition correctly fires a fresh alert.
-    """
     state["open_alert_id"]        = None
     state["assigned_stop_id"]     = None
     state["assigned_stop_name"]   = None
     state["assigned_stop_lat"]    = None
     state["assigned_stop_lng"]    = None
     state["assignment_time"]      = None
-    state["alert_sent"]           = False   # FIX: was missing — caused silent no-alert on re-trigger
+    state["alert_sent"]           = False
     state["overnight_alert_sent"] = False
     state["fuel_when_parked"]     = None
     state["sleeping"]             = False
@@ -244,7 +228,7 @@ def process_truck(vid, prev_state, current_data, truck_states):
             log.info(f"   {vname}: woke up still low — fresh alert")
             if state.get("open_alert_id"):
                 resolve_alert(state["open_alert_id"])
-            _clear_alert(state)  # FIX: this now resets alert_sent=False so _fire_alert runs
+            _clear_alert(state)
             state["state"]     = "CRITICAL_MOVING"
             state["next_poll"] = _next_poll(POLL_INTERVAL_CRITICAL_MOVING)
             _fire_alert(vid, state, current_data)
@@ -359,7 +343,7 @@ def _check_flags(vid, state, lat, lng, fuel, vname, driver):
             mark_flag_visited(flag["id"])
             resolve_alert(alert_id)
             send_refueled_alert(vname, driver, stop_name, fuel)
-            _clear_alert(state)  # FIX: alert_sent now reset so next low-fuel fires fresh alert
+            _clear_alert(state)
             continue
 
         hours = (_utcnow() - flag_at).total_seconds() / 3600
@@ -369,4 +353,4 @@ def _check_flags(vid, state, lat, lng, fuel, vname, driver):
                                         flag.get("telegram_msg_id"))
             mark_flag_skipped(flag["id"], msg_id)
             mark_alert_skipped(alert_id)
-            _clear_alert(state)  # FIX: alert_sent now reset so new stop can be assigned
+            _clear_alert(state)

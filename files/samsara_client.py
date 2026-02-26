@@ -44,11 +44,11 @@ def get_vehicle_locations() -> list[dict]:
 
 def get_vehicle_stats(vehicle_ids: list[str] = None) -> list[dict]:
     """
-    Returns engine/fuel stats for vehicles using the FEED endpoint.
-    This returns a stream of fuel events, not just the latest snapshot.
-    Each item: { id, name, fuelPercents: [{value, time}, ...], ... }
+    Returns engine/fuel stats for vehicles.
+    types: fuelPercents  (0-100 float)
+    Each item: { id, name, fuelPercents: {value, time}, ... }
     """
-    url = "https://api.samsara.com/fleet/vehicles/stats/feed"
+    url = "https://api.samsara.com/fleet/vehicles/stats"
     params = {"types": "fuelPercents"}
     if vehicle_ids:
         params["vehicleIds"] = ",".join(vehicle_ids)
@@ -96,15 +96,9 @@ def get_combined_vehicle_data() -> list[dict]:
     stats_map = {}
     for s in stats_raw:
         vid = s.get("id")
-        fuel_events = s.get("fuelPercents", [])
-        
-        if vid and fuel_events:
-            # Get the LATEST fuel reading from the feed
-            latest = max(fuel_events, key=lambda x: x.get("time", ""))
-            stats_map[vid] = float(latest.get("value", 100))
-        elif vid:
-            # No fuel events means no data, default to 100
-            stats_map[vid] = 100.0
+        fuel = s.get("fuelPercents", {})
+        if vid and fuel:
+            stats_map[vid] = float(fuel.get("value", 100))
 
     results = []
     for v in locations_raw:
