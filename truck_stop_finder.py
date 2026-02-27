@@ -198,56 +198,58 @@ def find_best_stop(truck_lat: float, truck_lng: float,
     # MOVING: brand priority, prefer ahead, fallback to any direction
     # -------------------------------------------------------------------------
 
-    # 1. Pilot within 50 mi AHEAD
-    results = _find_nearest(all_stops, truck_lat, truck_lng,
-                            PILOT_RADIUS_MILES, _is_pilot, truck_heading)
+    # Search all stops any direction, sort by smart score
+    # Score = distance, but stops behind truck get a 15 mile penalty
+    # This way: a stop 10 mi ahead beats a stop 8 mi behind
+    # But a stop 5 mi behind beats a stop 25 mi ahead
+    # Handles wrong heading data from Samsara gracefully
+
+    def _scored_search(brand_check, radius):
+        candidates = _find_nearest(all_stops, truck_lat, truck_lng,
+                                   radius, brand_check)
+        if not candidates:
+            return []
+        for c in candidates:
+            slat = float(c["latitude"])
+            slng = float(c["longitude"])
+            ahead = _is_ahead(truck_heading, truck_lat, truck_lng, slat, slng)
+            # Penalty for stops behind the truck
+            c["_score"] = c["distance_miles"] if ahead else c["distance_miles"] + 15
+        candidates.sort(key=lambda s: s["_score"])
+        return candidates
+
+    # 1. Pilot within 50 mi
+    results = _scored_search(_is_pilot, PILOT_RADIUS_MILES)
     if results:
         best = results[0]
-        log.info(f"Stop finder: Pilot '{best['name']}' {best['distance_miles']:.1f} mi ahead")
+        ahead = _is_ahead(truck_heading, truck_lat, truck_lng,
+                          float(best["latitude"]), float(best["longitude"]))
+        log.info(f"Stop finder: Pilot '{best['name']}' {best['distance_miles']:.1f} mi "+
+                 ("ahead" if ahead else "(behind - nearest option)"))
         return best, StopType.PILOT_50
 
-    # 2. Love's within 50 mi AHEAD
-    results = _find_nearest(all_stops, truck_lat, truck_lng,
-                            LOVES_RADIUS_MILES, _is_loves, truck_heading)
+    # 2. Love's within 50 mi
+    results = _scored_search(_is_loves, LOVES_RADIUS_MILES)
     if results:
         best = results[0]
-        log.info(f"Stop finder: Love's '{best['name']}' {best['distance_miles']:.1f} mi ahead")
+        ahead = _is_ahead(truck_heading, truck_lat, truck_lng,
+                          float(best["latitude"]), float(best["longitude"]))
+        log.info(f"Stop finder: Love's '{best['name']}' {best['distance_miles']:.1f} mi "+
+                 ("ahead" if ahead else "(behind - nearest option)"))
         return best, StopType.LOVES_50
 
-    # 3. Pilot within 80 mi AHEAD
-    results = _find_nearest(all_stops, truck_lat, truck_lng,
-                            EXTENDED_RADIUS_MILES, _is_pilot, truck_heading)
+    # 3. Pilot within 80 mi
+    results = _scored_search(_is_pilot, EXTENDED_RADIUS_MILES)
     if results:
         best = results[0]
-        log.info(f"Stop finder: Pilot '{best['name']}' {best['distance_miles']:.1f} mi ahead (extended)")
+        log.info(f"Stop finder: Pilot '{best['name']}' {best['distance_miles']:.1f} mi (extended)")
         return best, StopType.PILOT_80
 
-    # 4. Love's within 80 mi AHEAD
-    results = _find_nearest(all_stops, truck_lat, truck_lng,
-                            EXTENDED_RADIUS_MILES, _is_loves, truck_heading)
+    # 4. Love's within 80 mi
+    results = _scored_search(_is_loves, EXTENDED_RADIUS_MILES)
     if results:
         best = results[0]
-        log.info(f"Stop finder: Love's '{best['name']}' {best['distance_miles']:.1f} mi ahead (extended)")
-        return best, StopType.LOVES_80
-
-    # -------------------------------------------------------------------------
-    # FALLBACK: nothing ahead — search any direction
-    # (truck may be in remote area, turning around may be necessary)
-    # -------------------------------------------------------------------------
-    log.warning("Stop finder: nothing ahead within 80 mi — searching any direction")
-
-    results = _find_nearest(all_stops, truck_lat, truck_lng,
-                            EXTENDED_RADIUS_MILES, _is_pilot)
-    if results:
-        best = results[0]
-        log.info(f"Stop finder: Pilot '{best['name']}' {best['distance_miles']:.1f} mi (any direction)")
-        return best, StopType.PILOT_80
-
-    results = _find_nearest(all_stops, truck_lat, truck_lng,
-                            EXTENDED_RADIUS_MILES, _is_loves)
-    if results:
-        best = results[0]
-        log.info(f"Stop finder: Love's '{best['name']}' {best['distance_miles']:.1f} mi (any direction)")
+        log.info(f"Stop finder: Love's '{best['name']}' {best['distance_miles']:.1f} mi (extended)")
         return best, StopType.LOVES_80
 
     log.warning(f"Stop finder: no Pilot or Love's within {EXTENDED_RADIUS_MILES} miles")
