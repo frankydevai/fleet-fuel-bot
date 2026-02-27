@@ -36,7 +36,7 @@ log = logging.getLogger(__name__)
 
 EARTH_RADIUS_MILES    = 3958.8
 _PARKED_SPEED_MPH     = 5      # truck is parked if speed <= this
-_AT_STOP_RADIUS_MILES = 0.15   # 0.15 mi ~ 250m = truck is in the lot
+_AT_STOP_RADIUS_MILES = 0.35   # 0.35 mi ~ 600m = truck is in the lot (large truck stop properties)
 _AHEAD_MAX_DEGREES    = 120    # stops within this arc are considered "ahead"
                                 # 120 = 60 degrees left and right of heading
 
