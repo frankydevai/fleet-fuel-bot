@@ -285,6 +285,17 @@ def _fire_alert(vid, state, data):
     heading = data["heading"]
     speed   = data["speed_mph"]
 
+    # Calculate real heading from previous position if available
+    # Samsara GPS heading is sometimes wrong — movement-based heading is more reliable
+    prev_lat = state.get("lat")
+    prev_lng = state.get("lng")
+    if (prev_lat and prev_lng and speed > 10 and
+            (abs(lat - prev_lat) > 0.001 or abs(lng - prev_lng) > 0.001)):
+        from truck_stop_finder import _bearing
+        real_heading = _bearing(prev_lat, prev_lng, lat, lng)
+        log.info(f"   {vname}: Samsara heading={heading:.0f} real heading={real_heading:.0f} (from position change)")
+        heading = real_heading
+
     log.info(f"   {vname}: firing alert — fuel={fuel:.1f}%")
 
     alert_id = create_fuel_alert(vid, vname, driver, fuel, lat, lng, heading, speed)
