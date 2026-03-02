@@ -159,25 +159,27 @@ def find_best_stop(truck_lat: float, truck_lng: float,
     parked    = speed_mph <= _PARKED_SPEED_MPH
 
     # -------------------------------------------------------------------------
-    # Already at a stop? (parked within 0.15 mi of any stop)
+    # Already at a stop? Find the single nearest stop (any brand) and check
+    # if truck is within AT_STOP radius. Checks Pilot AND Love's equally.
     # -------------------------------------------------------------------------
     if parked:
-        for stop in all_stops:
-            if not _is_any(stop.get("brand", "")):
-                continue
+        # Find nearest stop of any brand, sorted by distance
+        nearest = _find_nearest(all_stops, truck_lat, truck_lng,
+                                _AT_STOP_RADIUS_MILES, _is_any)
+        if nearest:
+            stop = nearest[0]  # closest one
             slat = float(stop["latitude"])
             slng = float(stop["longitude"])
             dist = haversine_miles(truck_lat, truck_lng, slat, slng)
-            if dist <= _AT_STOP_RADIUS_MILES:
-                log.info(
-                    f"Stop finder: truck already at {stop['name']} "
-                    f"({dist * 5280:.0f} ft away) - no alert needed"
-                )
-                return {
-                    **stop,
-                    "distance_miles":  round(dist, 3),
-                    "google_maps_url": f"https://maps.google.com/?q={slat},{slng}",
-                }, StopType.AT_STOP
+            log.info(
+                f"Stop finder: truck already at {stop['name']} "
+                f"({dist * 5280:.0f} ft away) - no alert needed"
+            )
+            return {
+                **stop,
+                "distance_miles":  round(dist, 3),
+                "google_maps_url": f"https://maps.google.com/?q={slat},{slng}",
+            }, StopType.AT_STOP
 
     # -------------------------------------------------------------------------
     # PARKED: nearest stop any brand, any direction

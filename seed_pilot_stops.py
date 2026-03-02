@@ -165,9 +165,9 @@ def _map_loves_row(raw: dict) -> dict | None:
     elif store_num:
         mapped["name"] = f"Love's #{store_num}"
 
-    # Love's has a Diesel column - check if this stop has diesel
-    diesel_val = raw.get("Diesel", "1")
-    mapped["has_diesel"] = _parse_bool(diesel_val) if diesel_val else 1
+    # Loves Diesel column has fuel prices (e.g. 5.189) not yes/no flags
+    # Include ALL Love's stops - any location is useful
+    mapped["has_diesel"] = 1
 
     return _validate_and_coerce(mapped)
 
