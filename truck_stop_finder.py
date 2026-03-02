@@ -146,16 +146,24 @@ def _find_nearest(stops, truck_lat, truck_lng, radius_miles,
 
 def find_best_stop(truck_lat: float, truck_lng: float,
                    truck_heading: float,
-                   speed_mph: float = 0) -> tuple[dict | None, StopType]:
+                   speed_mph: float = 0,
+                   exclude_stop_ids: set = None) -> tuple[dict | None, StopType]:
     """
     Find the best diesel stop for a truck.
 
     For MOVING trucks: prefer stops ahead, fall back to any direction.
     For PARKED trucks: nearest stop any direction.
+    exclude_stop_ids: set of stop IDs to skip (previously skipped stops).
 
     Returns (stop_dict, StopType) or (None, StopType.NONE).
     """
     all_stops = get_all_stops_with_diesel()
+
+    # Filter out previously skipped stops
+    if exclude_stop_ids:
+        all_stops = [s for s in all_stops if s.get("id") not in exclude_stop_ids]
+        if exclude_stop_ids:
+            log.info(f"Stop finder: excluding {len(exclude_stop_ids)} skipped stop(s)")
     parked    = speed_mph <= _PARKED_SPEED_MPH
 
     # -------------------------------------------------------------------------

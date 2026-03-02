@@ -112,7 +112,12 @@ def _new_state(vid, data):
     }
 
 
-def _clear_alert(state):
+def _clear_alert(state, skipped_stop_id=None):
+    """Clear alert state. If skipped_stop_id provided, remember it to avoid re-recommending."""
+    if skipped_stop_id:
+        skipped = state.get("skipped_stop_ids", set())
+        skipped.add(skipped_stop_id)
+        state["skipped_stop_ids"] = skipped
     state["open_alert_id"]        = None
     state["assigned_stop_id"]     = None
     state["assigned_stop_name"]   = None
@@ -189,6 +194,7 @@ def process_truck(vid, prev_state, current_data, truck_states):
             log.info(f"   {vname}: fuel recovered to {fuel:.1f}% — closing alert")
             resolve_alert(state["open_alert_id"])
             _clear_alert(state)
+            state["skipped_stop_ids"] = set()  # reset skipped stops on fuel recovery
 
         if fuel > 50:
             state["state"]     = "HEALTHY"
@@ -301,7 +307,8 @@ def _fire_alert(vid, state, data):
     alert_id = create_fuel_alert(vid, vname, driver, fuel, lat, lng, heading, speed)
     state["open_alert_id"] = alert_id
 
-    stop, stop_type = find_best_stop(lat, lng, heading, speed)
+    skipped_ids = state.get("skipped_stop_ids", set())
+    stop, stop_type = find_best_stop(lat, lng, heading, speed, exclude_stop_ids=skipped_ids)
 
     if stop_type == StopType.AT_STOP:
         # Truck is physically in a stop's parking lot right now
@@ -341,13 +348,19 @@ def _fire_alert(vid, state, data):
 
 def _check_flags(vid, state, lat, lng, fuel, vname, driver):
     """
-    Near the assigned stop while moving = Refueled.
-    Flag older than SKIP_DETECTION_HOURS = Flagged/skipped.
-    NOT called while truck is sleeping.
+    Check if truck visited or skipped assigned stop.
+
+    REFUELED: truck is near the stop AND fuel increased by 5%+ since alert fired.
+    SKIPPED:  flag is older than SKIP_DETECTION_HOURS without refueling.
+
+    Never marks as refueled based on proximity alone - fuel must go UP.
     """
     flags = get_pending_flags_for_vehicle(vid)
     if not flags:
         return
+
+    # Fuel level when alert was originally fired
+    alert_fuel = state.get("fuel_pct", fuel)
 
     for flag in flags:
         stop_lat  = float(flag["stop_lat"])
@@ -356,19 +369,28 @@ def _check_flags(vid, state, lat, lng, fuel, vname, driver):
         flag_at   = _tz(flag["flagged_at"])
         alert_id  = flag["alert_id"]
 
-        if is_truck_near_stop(lat, lng, stop_lat, stop_lng, VISIT_RADIUS_MILES):
-            log.info(f"   {vname}: at '{stop_name}' while moving — Refueled")
+        near_stop = is_truck_near_stop(lat, lng, stop_lat, stop_lng, VISIT_RADIUS_MILES)
+        fuel_increased = fuel >= alert_fuel + 5  # fuel went up 5%+ = actually refueled
+
+        if near_stop and fuel_increased:
+            # Truck is at the stop AND fuel went up — genuinely refueled
+            log.info(f"   {vname}: refueled at '{stop_name}' — fuel {alert_fuel:.0f}% -> {fuel:.0f}%")
             mark_flag_visited(flag["id"])
             resolve_alert(alert_id)
             send_refueled_alert(vname, driver, stop_name, fuel)
             _clear_alert(state)
             continue
 
+        if near_stop and not fuel_increased:
+            # Truck passed by the stop but fuel didn't go up — just driving past
+            log.info(f"   {vname}: passed '{stop_name}' but fuel unchanged ({fuel:.0f}%) — not refueled")
+            continue
+
         hours = (_utcnow() - flag_at).total_seconds() / 3600
         if hours >= SKIP_DETECTION_HOURS:
-            log.warning(f"   {vname}: skipped '{stop_name}' after {hours:.1f}h")
+            log.warning(f"   {vname}: skipped '{stop_name}' after {hours:.1f}h — fuel still {fuel:.0f}%")
             msg_id = send_flagged_alert(vname, driver, stop_name, fuel,
                                         flag.get("telegram_msg_id"))
             mark_flag_skipped(flag["id"], msg_id)
             mark_alert_skipped(alert_id)
-            _clear_alert(state)
+            _clear_alert(state, skipped_stop_id=flag.get("stop_id"))
